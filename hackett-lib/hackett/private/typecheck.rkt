@@ -48,7 +48,8 @@
                                                [subgoals (listof constr?)]
                                                [ts (listof (and/c type? τ-mono?))]
                                                [dict-expr syntax?])])
-         type? τ=? constr? τ-mono? τ-vars^ τ->string τ-wf! current-τ-wf! type:app* τ:-> τ:->? τ:->*
+         type? τ=? constr? τ-mono? τ-vars^ τ->string τ-wf! current-τ-wf! type:app*
+         τ:-> τ:->*? τ:->* τ:->**
          generalize inst insts τ<:/full! τ<:/elaborate! τ<:! τ-inst-l! τ-inst-r!
          ctx-elem? ctx? ctx-elem=? ctx-member? ctx-remove
          ctx-find-solution current-ctx-solution apply-subst apply-current-subst
@@ -187,9 +188,9 @@
          [(type:qual constr t) (flatten-qual (cons constr constrs) t)]
          [other `(=> ,(map τ->datum (reverse constrs)) ,(τ->datum t))]))]))
 
-(define/contract (apply-τ t ts)
-  (-> type? (listof type?) type?)
-  (foldl t #{type:app %2 %1} ts))
+(define/contract (apply-τ t . ts)
+  (-> type? type? ... type?)
+  (foldl #{type:app %2 %1} t ts))
 (define (unapply-τ t)
   (-> type? (non-empty-listof type?))
   (match t
@@ -334,11 +335,24 @@
     [(_ a b)
      #'(type:app (type:app (== τ:-> τ=?) a) b)])
   (make-variable-like-transformer #'mk-τ:->))
-
-(define τ:->?
+(define τ:->*?
   (match-lambda
     [(τ:->* _ _) #t]
     [_ #f]))
+
+(define/contract (apply-τ:-> . ts)
+  (-> type? type? ... type?)
+  (match-let ([{list ts ... t} ts])
+    (foldr #{mk-τ:-> %2 %1} t ts)))
+(define/contract (unapply-τ:-> t)
+  (-> type? (non-empty-listof type?))
+  (match t
+    [(τ:->* a b) (cons a (unapply-τ:-> b))]
+    [_ (list t)]))
+(define-match-expander τ:->**
+  (syntax-parser
+    [(_ list-pats ...+) #'(app unapply-τ:-> (list list-pats ...))])
+  (make-variable-like-transformer #'apply-τ:->))
 
 ;; ---------------------------------------------------------------------------------------------------
 ;; subsumption, instantiation, and elaboration
