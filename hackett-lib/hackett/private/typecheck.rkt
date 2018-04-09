@@ -50,7 +50,7 @@
          current-type-context modify-type-context
          register-global-class-instance! lookup-instance!
          value-namespace-introduce type-namespace-introduce ~type
-         attach-type attach-expected get-type get-expected make-typed-var-transformer
+         expand-type attach-type attach-expected get-type get-expected make-typed-var-transformer
 
          (for-template (all-from-out hackett/private/type-language)
                        local-class-instances))
@@ -451,9 +451,13 @@
 
 ;; -------------------------------------------------------------------------------------------------
 
-(define/contract (τ-stx-token t #:expansion [stx #'(void)])
-  (->* [type?] [#:expansion syntax?] syntax?)
-  (syntax-property stx 'τ t))
+; TODO: Move to type-language.rkt?
+
+(define/contract expand-type
+  (-> syntax? type?)
+  (syntax-parser
+    #:context 'expand-type
+    [t:type #'t.expansion]))
 (define/contract (attach-type stx t)
   (-> syntax? type? syntax?)
   (syntax-property stx ': t))

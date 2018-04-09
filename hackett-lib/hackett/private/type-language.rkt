@@ -111,27 +111,28 @@
 ;; type expansion
 
 (begin-for-syntax
-  (define-syntax-class type
+  (define-syntax-class (type [intdef-ctx #f])
     #:description "type"
     #:attributes [expansion]
-    [pattern _ #:with :expanded-type (local-expand this-syntax 'expression type-literal-ids)])
+    [pattern _ #:with {~var || (expanded-type intdef-ctx)}
+                      (local-expand this-syntax 'expression type-literal-ids)])
 
-  (define-syntax-class expanded-type
+  (define-syntax-class (expanded-type intdef-ctx)
     #:description #f
     #:attributes [expansion]
     #:commit
     #:literal-sets [kernel-literals type-literals]
-    [pattern (head:#%expression ~! a:type)
+    [pattern (head:#%expression ~! {~var a (type intdef-ctx)})
              #:attr expansion (syntax-track-origin #'a.expansion this-syntax #'head)]
     [pattern (#%type:con ~! _:id)
              #:attr expansion this-syntax]
-    [pattern (head:#%type:app ~! a:type b:type)
+    [pattern (head:#%type:app ~! {~var a (type intdef-ctx)} {~var b (type intdef-ctx)})
              #:attr expansion (syntax/loc/props this-syntax
                                 (head a.expansion b.expansion))]
-    [pattern (head:#%type:forall ~! x:id t:type)
+    [pattern (head:#%type:forall ~! x:id {~var t (type intdef-ctx)})
              #:attr expansion (syntax/loc/props this-syntax
                                 (head x t.expansion))]
-    [pattern (head:#%type:qual ~! a:type b:type)
+    [pattern (head:#%type:qual ~! {~var a (type intdef-ctx)} {~var b (type intdef-ctx)})
              #:attr expansion (syntax/loc/props this-syntax
                                 (head a.expansion b.expansion))]
     [pattern (#%type:bound-var ~! _:id)

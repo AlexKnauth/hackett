@@ -14,7 +14,7 @@
          syntax/parse/define
 
          (for-syntax hackett/private/infix
-                     hackett/private/typecheck
+                     (rename-in hackett/private/typecheck [-> ->/prefix])
                      hackett/private/util/list
                      hackett/private/util/stx))
 
@@ -28,42 +28,37 @@
          -> ∀ => Integer Double String
          : λ1 def let letrec todo!)
 
-(define-simple-macro (define-base-type name:id)
-  (define-syntax name (make-type-variable-transformer (type:con #'name))))
-
 (define-base-type Integer)
 (define-base-type Double)
 (define-base-type String)
 
 (define-syntax-parser define-primop
   #:literals [:]
-  [(_ op:id op-:id colon:: t-expr:type)
-   #:with t (preservable-property->expression (attribute t-expr.τ))
-   (~> #'(begin-
-           (define-values- [] (begin- (λ- () t-expr.expansion) (values-)))
-           (define-syntax op (make-typed-var-transformer #'op- t)))
+  [(_ op:id op-:id colon:: t:type)
+   (~> #'(define-syntax op (make-typed-var-transformer #'op- (quote-syntax t.expansion)))
        (syntax-property 'disappeared-use (list (syntax-local-introduce #'op-)
                                                (syntax-local-introduce #'colon))))])
 
-(define-syntax ->/prefix (make-type-variable-transformer τ:->))
 (define-syntax -> (infix-operator-impl #'->/prefix 'right))
 
 (define-syntax-parser ∀
   #:literals [let-values]
   [(_ x:id t)
+   ; TODO: move logic to #%type:forall
    #:with x- (generate-temporary #'x)
-   #:with x/τ (preservable-property->expression (type:bound-var #'x-))
-   #:with (let-values _ {~and inner-let (let-values _ t-:type)})
-          (local-expand-type #'(let-syntax ([x (make-type-variable-transformer x/τ)])
-                                 t))
-   (~> (τ-stx-token (type:forall #'x- (attribute t-.τ))
-                    #:expansion #'(void- t-.expansion))
-       (syntax-property 'disappeared-binding (syntax-property #'inner-let 'disappeared-binding)))])
+   #:do [(define intdef-ctx (syntax-local-make-definition-context))
+         (syntax-local-bind-syntaxes (list #'x)
+                                     #'(make-variable-like-transformer (#%type:bound-var x-))
+                                     intdef-ctx)]
+   #:with {~var t- (type intdef-ctx)} #'t
+   (~> (syntax/loc this-syntax
+         (#%type:forall x- t-.expansion))
+       ; FIXME
+       #;(syntax-property 'disappeared-binding (syntax-property #'inner-let 'disappeared-binding)))])
 
 (define-syntax-parser =>
   [(_ constr:type t:type)
-   (τ-stx-token (type:qual (attribute constr.τ) (attribute t.τ))
-                #:expansion #'(void- constr.expansion t.expansion))])
+   #'(#%type:qual constr.expansion t.expansion)])
 
 (define-syntax (@%superclasses-key stx)
   (raise-syntax-error #f "cannot be used as an expression" stx))
@@ -116,48 +111,48 @@
     (define/contract (simplify/elaborate e t)
       (-> syntax? (or/c type? #f)
           (list/c syntax? (-> syntax? type? (values syntax? type?))))
-      (when t
-        (current-τ-wf! t))
-      (match t
-        ; If t is #f, we’re in inference mode, so we don’t need to do anything but pass values through
-        ; unchanged.
-        [#f
-         (list e (λ (e- t_⇒) (values e- t_⇒)))]
-        ; If the expected type is quantified, we need to skolemize it before continuing with
-        ; inference.
-        [(type:forall x a)
-         (let ([x^ (generate-temporary x)])
-           (modify-type-context #{snoc % (ctx:rigid x^)})
-           (match-let ([(list e* k) (simplify/elaborate e (inst a x (type:rigid-var x^)))])
-             (list e* (λ (e- t_⇒)
-                        (begin0
-                          (k e- t_⇒)
-                          (modify-type-context #{ctx-remove % (ctx:rigid x^)}))))))]
-        ; If the expected type is qualified, we need to wrap the expression with a lambda so that it
-        ; can receive a dictionary.
-        [(type:qual constr a)
-         (match-let ([(list e* k) (simplify/elaborate e a)])
-           (list e* (λ (e- t_⇒)
-                      (let-values ([(e-* t*) (k e- t_⇒)])
-                        (values
-                         (quasisyntax/loc e-*
-                           (@%with-dictionary #,(preservable-property->expression constr) #,e-*))
-                         t*)))))]
-        ; Otherwise, we are in checking mode with no special cases. We need to infer and expand, then
-        ; check that the types match and elaborate dictionaries.
-        [_
-         (list (attach-expected e t)
-               (λ (e- t_⇒)
-                 (let ([constrs (τ<:/elaborate! t_⇒ t #:src e)])
-                   (values (foldr #{begin (quasisyntax/loc e
-                                            (lazy- (#%app- (force- #,%2)
-                                                           #,(quasisyntax/loc e
-                                                               (@%dictionary-placeholder
-                                                                #,(preservable-property->expression
-                                                                   %1)
-                                                                #,e)))))}
-                                  e- constrs)
-                           t))))]))
+      (cond
+        [t
+         (current-τ-wf! t)
+         (syntax-parse t
+           #:context 'simplify/elaborate
+           #:literal-sets [type-literals]
+           ; If the expected type is quantified, we need to skolemize it before continuing with
+           ; inference.
+           [(#%type:forall x a)
+            #:with x^ (generate-temporary #'x)
+            (modify-type-context #{snoc % (ctx:rigid #'x^)})
+            (match-let ([(list e* k) (simplify/elaborate e (inst #'a #'x #'(#%type:rigid-var x^)))])
+              (list e* (λ (e- t_⇒)
+                         (begin0
+                           (k e- t_⇒)
+                           (modify-type-context #{ctx-remove % (ctx:rigid #'x^)})))))]
+           ; If the expected type is qualified, we need to wrap the expression with a lambda so that
+           ; it can receive a dictionary.
+           [(#%type:qual constr a)
+            (match-let ([(list e* k) (simplify/elaborate e #'a)])
+              (list e* (λ (e- t_⇒)
+                         (let-values ([(e-* t*) (k e- t_⇒)])
+                           (values
+                            (quasisyntax/loc e-*
+                              (@%with-dictionary constr #,e-*))
+                            t*)))))]
+           ; Otherwise, we are in checking mode with no special cases. We need to infer and expand,
+           ; then check that the types match and elaborate dictionaries.
+           [_
+            (list (attach-expected e t)
+                  (λ (e- t_⇒)
+                    (let ([constrs (τ<:/elaborate! t_⇒ t #:src e)])
+                      (values (foldr #{quasisyntax/loc e
+                                        (lazy- (#%app- (force- #,%2)
+                                                       #,(quasisyntax/loc e
+                                                           (@%dictionary-placeholder #,%1 #,e))))}
+                                     e- constrs)
+                              t))))])]
+        [else
+         ; If t is #f, we’re in inference mode, so we don’t need to do anything but pass values
+         ; through unchanged.
+         (list e (λ (e- t_⇒) (values e- t_⇒)))]))
 
     ; To begin the actual inference process, we need to generate some bindings for the assumptions. We
     ; do this by binding a slot for each identifier in a definition context, then binding each
@@ -245,30 +240,30 @@
 
   (define/contract (τ⇒app! e_fn t_fn e_arg #:src src)
     (-> syntax? type? syntax? #:src syntax? (values syntax? type?))
-    (match t_fn
-      [(type:wobbly-var x^)
-       (let ([x1^ (generate-temporary x^)]
-             [x2^ (generate-temporary x^)])
-         (modify-type-context
-          #{snoc % (ctx:solution x^ (τ:->* (type:wobbly-var x1^) (type:wobbly-var x2^)))})
-         (values (quasisyntax/loc src
-                   (lazy- (#%app- (force- #,e_fn) #,(τ⇐! e_arg (type:wobbly-var x1^)))))
-                 (type:wobbly-var x2^)))]
-      [(τ:->* a b)
+    (syntax-parse t_fn
+      #:context 'τ⇒app!
+      #:literal-sets [type-literals]
+      [(#%type:wobbly-var x^)
+       #:with [x1^ x2^] (generate-temporaries #'[x^ x^])
+       (modify-type-context
+        #{snoc % (ctx:solution #'x^ (template
+                                     (?->* (#%type:wobbly-var x1^) (#%type:wobbly-var x2^))))})
        (values (quasisyntax/loc src
-                 (lazy- (#%app- (force- #,e_fn) #,(τ⇐! e_arg a))))
-               b)]
-      [(type:forall x t)
-       (let ([x^ (generate-temporary x)])
-         (τ⇒app! e_fn (inst t x (type:wobbly-var x^)) e_arg #:src src))]
-      [(type:qual constr t)
+                 (lazy- (#%app- (force- #,e_fn) #,(τ⇐! e_arg #'(#%type:wobbly-var x1^)))))
+               #'(#%type:wobbly-var x2^))]
+      [(~->+ a b)
+       (values (quasisyntax/loc src
+                 (lazy- (#%app- (force- #,e_fn) #,(τ⇐! e_arg #'a))))
+               #'b)]
+      [(#%type:forall x t)
+       #:with x^ (generate-temporary #'x)
+       (τ⇒app! e_fn (inst #'t #'x #'(#%type:wobbly-var x^)) e_arg #:src src)]
+      [(#%type:qual constr t)
        (τ⇒app! (quasisyntax/loc src
                  (lazy- (#%app- (force- #,e_fn)
                                 #,(quasisyntax/loc src
-                                    (@%dictionary-placeholder
-                                     #,(preservable-property->expression constr)
-                                     #,src)))))
-               t e_arg #:src src)]
+                                    (@%dictionary-placeholder constr #,src)))))
+               #'t e_arg #:src src)]
       [_ (raise-syntax-error #f (format "cannot apply expression of type ~a to expression ~a"
                                         (τ->string t_fn) (syntax->datum e_arg))
                              e_arg)]))
@@ -284,16 +279,22 @@
   ; Given a constraint, calculate the instances it brings in scope, including instances that can be
   ; derived via superclasses. For example, the constraint (Monad m) brings in three instances, one for
   ; Monad and two for Functor and Applicative.
-  (define/contract constraint->instances
+  (define/contract (constraint->instances constr dict-expr)
     (-> constr? syntax? (listof class:instance?))
-    (match-lambda**
-     [[(type:app* (type:con class-id) ts ...) dict-expr]
-      (let* ([class-info (syntax-local-value class-id)]
-             [instance (class:instance class-info '() '() (map apply-current-subst ts) dict-expr)]
+    (syntax-parse constr
+      #:context 'constraint->instances
+      #:literal-sets [type-literals]
+     [(~#%type:app* (#%type:con class-id) ts ...)
+      (let* ([class-info (syntax-local-value #'class-id)]
+             [instance (class:instance class-info '() '()
+                                       (map apply-current-subst (attribute ts))
+                                       dict-expr)]
              ; instantiate the superclass constraints, so for (Monad Unit), we get (Applicative Unit)
              ; instead of (Applicative m)
              [super-constrs (~>> (class:info-superclasses class-info)
-                                 (map #{insts % (map cons (class:info-vars class-info) ts)}))]
+                                 (map #{insts % (map cons
+                                                     (class:info-vars class-info)
+                                                     (attribute ts))}))]
              [superclass-dict-expr #`(free-id-table-ref- #,dict-expr #'@%superclasses-key)]
              [super-instances (for/list ([(super-constr i) (in-indexed (in-list super-constrs))])
                                 (constraint->instances
@@ -349,50 +350,43 @@
 
 (define-syntax-parser @%datum
   [(_ . n:exact-integer)
-   (attach-type #'(#%datum . n) (parse-type #'Integer))]
+   (attach-type #'(#%datum . n) (expand-type #'Integer))]
   [(_ . n:number)
    #:when (double-flonum? (syntax-e #'n))
-   (attach-type #'(#%datum . n) (parse-type #'Double))]
+   (attach-type #'(#%datum . n) (expand-type #'Double))]
   [(_ . s:str)
-   (attach-type #'(#%datum . s) (parse-type #'String))]
+   (attach-type #'(#%datum . s) (expand-type #'String))]
   [(_ . x)
    (raise-syntax-error #f "literal not supported" #'x)])
 
 (define-syntax-parser :
-  [(_ e {~type t-expr:type})
-   (attach-type #`(let-values- ([() (begin- (λ- () t-expr.expansion) (values-))])
-                    #,(τ⇐! #'e (attribute t-expr.τ)))
-                (apply-current-subst (attribute t-expr.τ)))])
+  [(_ e {~type t:type})
+   (attach-type #`(let-values- ([() (begin- (quote-syntax t.expansion) (values-))])
+                    #,(τ⇐! #'e #'t.expansion))
+                #'t.expansion)])
 
 (define-syntax-parser λ1
   [(_ x:id e:expr)
    #:do [(define t (get-expected this-syntax))]
    #:fail-unless t "no expected type, add more type annotations"
-   #:fail-unless (τ:->? t) (format "expected ~a, given function" (τ->string t))
-   #:do [(match-define (τ:->* a b) t)
-         (define-values [xs- e-] (τ⇐/λ! #'e b (list (cons #'x a))))]
+   #:with {~or {~->+ a b} {~fail (format "expected ~a, given function" (τ->string t))}} t
+   #:do [(define-values [xs- e-] (τ⇐/λ! #'e #'b (list (cons #'x #'a))))]
    #:with [x-] xs-
    (attach-type #`(λ- (x-) #,e-) t)]
   [(_ x:id e:expr)
-   #:do [(define x^ (generate-temporary))
-         (define y^ (generate-temporary))
-         (define-values [xs- e-]
-           (τ⇐/λ! #'e (type:wobbly-var y^) (list (cons #'x (type:wobbly-var x^)))))]
+   #:with x^ (generate-temporary)
+   #:with y^ (generate-temporary)
+   #:do [(define-values [xs- e-]
+           (τ⇐/λ! #'e #'(#%type:wobbly-var y^) (list (cons #'x #'(#%type:wobbly-var x^)))))]
    #:with [x-] xs-
-   (attach-type #`(λ- (x-) #,e-) (τ:->* (type:wobbly-var x^) (type:wobbly-var y^)))])
+   (attach-type #`(λ- (x-) #,e-) #'(?->* (#%type:wobbly-var x^) (#%type:wobbly-var y^)))])
 
-(define-syntax (@%app stx)
-  (if (type-transforming?)
-      (syntax-parse stx
-        [(_ a:type b:type)
-         (τ-stx-token (type:app (attribute a.τ) (attribute b.τ))
-                      #:expansion #'(void- a.expansion b.expansion))])
-      (syntax-parse stx
-        [(_ f:expr e:expr)
-         #:do [(define-values [f- t_f] (τ⇒! #'f))
-               (define-values [r- t_r] (τ⇒app! f- (apply-current-subst t_f) #'e
-                                               #:src this-syntax))]
-         (attach-type r- t_r)])))
+(define-syntax-parser @%app
+  [(_ f:expr e:expr)
+   #:do [(define-values [f- t_f] (τ⇒! #'f))
+         (define-values [r- t_r] (τ⇒app! f- (apply-current-subst t_f) #'e
+                                         #:src this-syntax))]
+   (attach-type r- t_r)])
 
 (define-syntax-parser def
   #:literals [:]
@@ -402,12 +396,10 @@
       ...
       e:expr)
    #:with id- (generate-temporary #'id)
-   #:with id/prefix (generate-temporary #'id)
-   #:with t-expr (preservable-property->expression (attribute t.τ))
    #`(begin-
-       (define- id- (: e t))
+       (define- id- (: e t.expansion))
        #,(indirect-infix-definition
-          #'(define-syntax- id (make-typed-var-transformer #'id- t-expr))
+          #'(define-syntax- id (make-typed-var-transformer #'id- (quote-syntax t.expansion)))
           (attribute fixity.fixity)))]
   [(_ id:id
       {~optional fixity:fixity-annotation}
@@ -416,7 +408,6 @@
            (let-values ([(e- t) (τ⇒! #'e)])
              (values e- (apply-current-subst t))))]
    #:with id- (generate-temporary #'id)
-   #:with id/prefix (generate-temporary #'id)
    #:with t-expr (preservable-property->expression (generalize t))
    #`(begin-
        (define- id- #,e-)
@@ -430,7 +421,7 @@
 
 (define-syntax-parser todo!*
   [(_ v e ...)
-   #:do [(define type (apply-current-subst (type:wobbly-var #'v)))
+   #:do [(define type (apply-current-subst #'(#%type:wobbly-var v)))
          (define type-str (τ->string type))]
    #:with message (string-append (source-location->prefix this-syntax)
                                  "todo! with type "
@@ -443,17 +434,17 @@
    #:with var (generate-temporary #'t_todo!)
    #:with contents (syntax/loc this-syntax (todo!* var e ...))
    (attach-type (syntax/loc this-syntax (#%defer-expansion contents))
-                (type:wobbly-var #'var))])
+                #'(#%type:wobbly-var var))])
 
 (define-syntax-parser let1
   #:literals [:]
   [(_ [id:id {~optional {~seq colon:: {~type t-ann:type}}} val:expr] body:expr)
-   #:do [(define-values [val- t_val] (τ⇔! #'val (attribute t-ann.τ)))
+   #:do [(define-values [val- t_val] (τ⇔! #'val #'t-ann.expansion))
          (match-define-values [(list id-) body- t_body]
            (τ⇔/λ! #'body (get-expected this-syntax) (list (cons #'id t_val))))]
    (~> (quasitemplate/loc this-syntax
          (let-values- ([(#,id-) #,val-]
-                       {?? [() (begin- (λ- () t-ann.expansion) (values-))]})
+                       {?? [() (begin- (quote-syntax- t-ann.expansion) (values-))]})
            #,body-))
        (attach-type t_body)
        (syntax-property 'disappeared-use (and~> (attribute colon) syntax-local-introduce)))])
@@ -487,12 +478,12 @@
                  (for/fold ([ids+ts+vals/ann '()]
                             [ids+ts+vals/unann '()])
                            ([id (in-list (attribute id))]
-                            [t-ann (in-list (attribute t-ann.τ))]
+                            [t-ann (in-list (attribute t-ann.expansion))]
                             [val (in-list (attribute val))])
                    (if t-ann
                        (values (cons (list id t-ann val) ids+ts+vals/ann) ids+ts+vals/unann)
                        (let* ([t_val-id (generate-temporary)]
-                              [t_val (type:wobbly-var t_val-id)])
+                              [t_val #`(#%type:wobbly-var #,t_val-id)])
                          (values ids+ts+vals/ann (cons (list id t_val val) ids+ts+vals/unann)))))])
              (values (reverse ids+ts+vals/ann) (reverse ids+ts+vals/unann))))
 
