@@ -1,5 +1,6 @@
 #lang s-exp syntax/module-reader hackett-module
 #:wrapper1 call-with-hackett-module-reading-parameterization
+#:language-info '#[hackett-module/lang/language-info get-language-info #f]
 #:module-wrapper module-wrapper-insert-type-require
 (require hackett-module/reader
          (submod hackett/private/kernel module-wrapper))
